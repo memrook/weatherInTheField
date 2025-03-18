@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"weatherInTheField/pkg/api"
@@ -170,6 +171,76 @@ func (d *DBManager) StoreStations(devices []api.Device) error {
 
 // StoreTelemetry сохраняет телеметрию в базу данных
 func (d *DBManager) StoreTelemetry(deviceID string, data map[string][]api.TelemetryPoint) error {
+	// Объединим все точки данных в один массив для обработки по пакетам
+	var allPoints []struct {
+		SensorKey      string
+		TelemetryPoint api.TelemetryPoint
+	}
+
+	for sensorKey, points := range data {
+		for _, point := range points {
+			allPoints = append(allPoints, struct {
+				SensorKey      string
+				TelemetryPoint api.TelemetryPoint
+			}{
+				SensorKey:      sensorKey,
+				TelemetryPoint: point,
+			})
+		}
+	}
+
+	// Размер пакета (чанка) для обработки
+	const batchSize = 200
+	totalBatches := (len(allPoints) + batchSize - 1) / batchSize
+
+	// Если есть несколько пакетов, выводим информацию
+	if totalBatches > 1 {
+		log.Printf("Разбиваем %d записей на %d пакетов по %d записей", len(allPoints), totalBatches, batchSize)
+	}
+
+	// Обрабатываем данные пакетами
+	for i := 0; i < len(allPoints); i += batchSize {
+		end := i + batchSize
+		if end > len(allPoints) {
+			end = len(allPoints)
+		}
+
+		// Обрабатываем текущий пакет
+		currentBatch := allPoints[i:end]
+		batchNum := (i / batchSize) + 1
+
+		// Если много пакетов, выводим информацию о текущем пакете
+		if totalBatches > 1 && batchNum%5 == 0 {
+			log.Printf("Сохранение пакета %d из %d (%.1f%%)",
+				batchNum,
+				totalBatches,
+				float64(batchNum)/float64(totalBatches)*100)
+		}
+
+		if err := d.storeTelemetryBatch(deviceID, currentBatch); err != nil {
+			return fmt.Errorf("ошибка при сохранении пакета данных телеметрии %d из %d (%d-%d): %w",
+				batchNum, totalBatches, i, end, err)
+		}
+	}
+
+	// Если было несколько пакетов, выводим информацию о завершении
+	if totalBatches > 1 {
+		log.Printf("Все %d пакетов успешно сохранены в базу данных", totalBatches)
+	}
+
+	return nil
+}
+
+// storeTelemetryBatch сохраняет пакет данных телеметрии в базу данных
+func (d *DBManager) storeTelemetryBatch(deviceID string, batch []struct {
+	SensorKey      string
+	TelemetryPoint api.TelemetryPoint
+}) error {
+	// Если пакет пустой, ничего не делаем
+	if len(batch) == 0 {
+		return nil
+	}
+
 	// Начинаем транзакцию
 	tx, err := d.DB.Begin()
 	if err != nil {
@@ -203,40 +274,41 @@ func (d *DBManager) StoreTelemetry(deviceID string, data map[string][]api.Teleme
 	}
 	defer stmt.Close()
 
-	// Вставляем каждую точку данных
-	for sensorKey, points := range data {
-		for _, point := range points {
-			// Конвертируем timestamp в DateTime
-			dateValue := time.Unix(point.Ts/1000, 0)
+	// Вставляем каждую точку данных из пакета
+	for _, item := range batch {
+		sensorKey := item.SensorKey
+		point := item.TelemetryPoint
 
-			// Преобразуем значение в float64
-			var floatValue float64
-			switch v := point.Value.(type) {
-			case float64:
-				floatValue = v
-			case float32:
-				floatValue = float64(v)
-			case int:
-				floatValue = float64(v)
-			case int64:
-				floatValue = float64(v)
-			default:
-				// Пропускаем значения, которые не могут быть преобразованы в float64
-				continue
-			}
+		// Конвертируем timestamp в DateTime
+		dateValue := time.Unix(point.Ts/1000, 0)
 
-			// Выполняем запрос с именованными параметрами
-			_, err := stmt.Exec(
-				sql.Named("StationID", deviceID),
-				sql.Named("SensorKey", sensorKey),
-				sql.Named("Timestamp", point.Ts),
-				sql.Named("DateValue", dateValue),
-				sql.Named("Value", floatValue),
-			)
-			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("ошибка при вставке телеметрии: %w", err)
-			}
+		// Преобразуем значение в float64
+		var floatValue float64
+		switch v := point.Value.(type) {
+		case float64:
+			floatValue = v
+		case float32:
+			floatValue = float64(v)
+		case int:
+			floatValue = float64(v)
+		case int64:
+			floatValue = float64(v)
+		default:
+			// Пропускаем значения, которые не могут быть преобразованы в float64
+			continue
+		}
+
+		// Выполняем запрос с именованными параметрами
+		_, err := stmt.Exec(
+			sql.Named("StationID", deviceID),
+			sql.Named("SensorKey", sensorKey),
+			sql.Named("Timestamp", point.Ts),
+			sql.Named("DateValue", dateValue),
+			sql.Named("Value", floatValue),
+		)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("ошибка при вставке телеметрии: %w", err)
 		}
 	}
 

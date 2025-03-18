@@ -207,17 +207,25 @@ func processDevice(weatherAPI *api.WeatherAPI, dbManager *database.DBManager, de
 			continue
 		}
 
-		log.Printf("Для устройства %s за период %s - %s получено %d новых записей",
+		log.Printf("Для устройства %s за период %s - %s получено %d новых записей. Сохраняем в базу данных...",
 			device.ID,
 			time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
 			time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"),
 			recordsCount)
 
 		// Сохраняем телеметрию в базу данных
+		startTime := time.Now()
 		if err := dbManager.StoreTelemetry(device.ID, telemetry); err != nil {
 			log.Printf("Ошибка при сохранении телеметрии для устройства %s: %v", device.ID, err)
 			continue
 		}
+
+		// Вычисляем, сколько времени заняло сохранение данных
+		elapsed := time.Since(startTime)
+		log.Printf("Данные для устройства %s успешно сохранены в базу (время: %.2f сек., скорость: %.1f записей/сек.)",
+			device.ID,
+			elapsed.Seconds(),
+			float64(recordsCount)/elapsed.Seconds())
 
 		totalRecordsCount += recordsCount
 	}
