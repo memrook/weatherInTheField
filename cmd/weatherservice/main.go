@@ -15,16 +15,14 @@ import (
 
 // Определяем ключи датчиков, которые нам нужны
 var sensorKeys = []string{
-	"airtemp",        // Температура воздуха
-	"soiltemp",       // Температура почвы
-	"soilmoist",      // Влажность почвы
-	"rainfall_daily", // Осадки за день
-	"rainfall",       // Текущие осадки
-	"windspeed",      // Скорость ветра
-	"winddir",        // Направление ветра
-	"airhum",         // Влажность воздуха
-	"pressure",       // Атмосферное давление
-	"battery",        // Заряд батареи
+	"airtemp",      // Температура воздуха
+	"soiltemp",     // Температура почвы
+	"airmoist",     // Влажность воздуха (ранее airhum)
+	"rainfall",     // Количество осадков
+	"windspeed",    // Скорость ветра
+	"windspeedmax", // Порывы ветра
+	"winddir",      // Направление ветра
+	"winddirang",   // Направление ветра в градусах
 }
 
 func main() {
@@ -121,10 +119,16 @@ func processDevice(weatherAPI *api.WeatherAPI, dbManager *database.DBManager, de
 
 	// Стандартный интервал для получения данных (если нет данных в БД)
 	intervalMs := int64(15 * 60 * 1000) // 15 минут в миллисекундах
-	tsFrom := now - intervalMs
 
-	// Флаг, указывающий что по станции нет данных вообще
-	noDataForStation := true
+	// Создаем карту для хранения данных о последнем timestamp для каждого датчика
+	sensorLastTs := make(map[string]int64)
+
+	// Создаем два списка датчиков - новые (без данных) и существующие
+	var newSensors []string
+	var existingSensors []string
+
+	// Определяем минимальный tsFrom для существующих датчиков
+	minTsFrom := now
 
 	// Пытаемся получить время последних данных для каждого ключа датчика
 	for _, sensorKey := range sensorKeys {
@@ -132,38 +136,77 @@ func processDevice(weatherAPI *api.WeatherAPI, dbManager *database.DBManager, de
 		lastTs, err := dbManager.GetLatestTelemetryTimestamp(device.ID, sensorKey)
 		if err != nil {
 			log.Printf("Ошибка при получении последнего timestamp для %s-%s: %v", device.ID, sensorKey, err)
+			// Если ошибка, считаем что данных нет
+			newSensors = append(newSensors, sensorKey)
 			continue
 		}
 
-		// Если для этого датчика есть хоть какие-то данные,
-		// то метеостанция уже добавлена в базу с некоторыми данными
-		if lastTs > 0 {
-			noDataForStation = false
+		sensorLastTs[sensorKey] = lastTs
 
-			// Если данные старше текущего начального времени запроса,
-			// обновляем начальное время для обеспечения непрерывности данных
-			if lastTs < tsFrom {
-				// Добавляем 1 миллисекунду, чтобы не получать повторно ту же запись
-				tsFrom = lastTs + 1
-				log.Printf("Для устройства %s и датчика %s используем время последней записи: %d",
-					device.ID, sensorKey, lastTs)
-				break // Достаточно найти хотя бы один датчик с данными
+		// Проверяем, есть ли для этого датчика данные в базе
+		if lastTs > 0 {
+			existingSensors = append(existingSensors, sensorKey)
+
+			// Определяем минимальный timestamp для всех существующих датчиков
+			if lastTs < minTsFrom {
+				minTsFrom = lastTs
 			}
+		} else {
+			// Датчик есть в списке, но данных по нему нет
+			newSensors = append(newSensors, sensorKey)
 		}
 	}
 
-	// Определяем период запроса данных
-	var periods []timePeriod
+	// Рассчитываем tsFrom для существующих датчиков
+	tsFrom := now - intervalMs
+	if minTsFrom < now && minTsFrom > 0 {
+		// Добавляем 1 миллисекунду, чтобы не получать повторно ту же запись
+		tsFrom = minTsFrom + 1
+	}
 
-	// Если по метеостанции нет никаких данных, запрашиваем данные за последний год по месяцам
-	if noDataForStation {
-		// Разбиваем год на месячные интервалы
+	// Общее количество полученных записей
+	totalRecordsCount := 0
+
+	// Обрабатываем новые датчики, если они есть
+	if len(newSensors) > 0 {
+		log.Printf("Для устройства %s запрашиваем годовые данные для %d новых датчиков: %v",
+			device.ID, len(newSensors), newSensors)
+
+		// Определяем время начала годового периода
 		oneYearAgo := now - 365*24*60*60*1000 // 365 дней в миллисекундах
-		log.Printf("Для устройства %s нет данных в базе. Разбиваем запрос данных за последний год на месячные интервалы.", device.ID)
-		periods = splitTimePeriodByMonth(oneYearAgo, now)
-	} else {
-		// Если данные есть, но они слишком старые (больше месяца),
-		// разбиваем запросы на промежутки по 30 дней
+
+		// Разбиваем год на месячные интервалы
+		periods := splitTimePeriodByMonth(oneYearAgo, now)
+
+		// Обрабатываем каждый временной период
+		for _, period := range periods {
+			// Получаем телеметрию за текущий период только для новых датчиков
+			telemetry, err := weatherAPI.GetTelemetry(device.ID, newSensors, period.from, period.to)
+			if err != nil {
+				log.Printf("Ошибка при получении телеметрии для новых датчиков устройства %s за период %s - %s: %v",
+					device.ID,
+					time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
+					time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"),
+					err)
+				continue
+			}
+
+			recordsCount := processAndSaveTelemetry(device.ID, telemetry, dbManager)
+			totalRecordsCount += recordsCount
+		}
+	}
+
+	// Обрабатываем существующие датчики, если они есть
+	if len(existingSensors) > 0 {
+		log.Printf("Для устройства %s запрашиваем обновленные данные для %d существующих датчиков с %s",
+			device.ID,
+			len(existingSensors),
+			time.Unix(tsFrom/1000, 0).Format("2006-01-02 15:04:05"))
+
+		// Определяем период запроса данных для существующих датчиков
+		var periods []timePeriod
+
+		// Если последняя запись старше месяца, разбиваем запросы на промежутки
 		oneMonthAgo := now - 30*24*60*60*1000 // 30 дней в миллисекундах
 		if tsFrom < oneMonthAgo {
 			log.Printf("Для устройства %s данные старше месяца. Разбиваем запрос на меньшие интервалы.", device.ID)
@@ -175,59 +218,23 @@ func processDevice(weatherAPI *api.WeatherAPI, dbManager *database.DBManager, de
 			log.Printf("Для устройства %s запрашиваем данные за последние %d минут", device.ID, minutesAgo)
 			periods = []timePeriod{{tsFrom, now}}
 		}
-	}
 
-	// Общее количество полученных записей
-	totalRecordsCount := 0
+		// Обрабатываем каждый временной период
+		for _, period := range periods {
+			// Получаем телеметрию за текущий период только для существующих датчиков
+			telemetry, err := weatherAPI.GetTelemetry(device.ID, existingSensors, period.from, period.to)
+			if err != nil {
+				log.Printf("Ошибка при получении телеметрии для существующих датчиков устройства %s за период %s - %s: %v",
+					device.ID,
+					time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
+					time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"),
+					err)
+				continue
+			}
 
-	// Обрабатываем каждый временной период
-	for _, period := range periods {
-		// Получаем телеметрию за текущий период
-		telemetry, err := weatherAPI.GetTelemetry(device.ID, sensorKeys, period.from, period.to)
-		if err != nil {
-			log.Printf("Ошибка при получении телеметрии для устройства %s за период %s - %s: %v",
-				device.ID,
-				time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
-				time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"),
-				err)
-			continue // Продолжаем с следующим периодом
+			recordsCount := processAndSaveTelemetry(device.ID, telemetry, dbManager)
+			totalRecordsCount += recordsCount
 		}
-
-		// Считаем количество полученных записей
-		recordsCount := 0
-		for _, points := range telemetry {
-			recordsCount += len(points)
-		}
-
-		if recordsCount == 0 {
-			log.Printf("Для устройства %s за период %s - %s новых данных не получено",
-				device.ID,
-				time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
-				time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"))
-			continue
-		}
-
-		log.Printf("Для устройства %s за период %s - %s получено %d новых записей. Сохраняем в базу данных...",
-			device.ID,
-			time.Unix(period.from/1000, 0).Format("2006-01-02 15:04:05"),
-			time.Unix(period.to/1000, 0).Format("2006-01-02 15:04:05"),
-			recordsCount)
-
-		// Сохраняем телеметрию в базу данных
-		startTime := time.Now()
-		if err := dbManager.StoreTelemetry(device.ID, telemetry); err != nil {
-			log.Printf("Ошибка при сохранении телеметрии для устройства %s: %v", device.ID, err)
-			continue
-		}
-
-		// Вычисляем, сколько времени заняло сохранение данных
-		elapsed := time.Since(startTime)
-		log.Printf("Данные для устройства %s успешно сохранены в базу (время: %.2f сек., скорость: %.1f записей/сек.)",
-			device.ID,
-			elapsed.Seconds(),
-			float64(recordsCount)/elapsed.Seconds())
-
-		totalRecordsCount += recordsCount
 	}
 
 	if totalRecordsCount > 0 {
@@ -235,6 +242,38 @@ func processDevice(weatherAPI *api.WeatherAPI, dbManager *database.DBManager, de
 	} else {
 		log.Printf("Для устройства %s не получено никаких новых данных.", device.ID)
 	}
+}
+
+// processAndSaveTelemetry обрабатывает и сохраняет полученную телеметрию
+func processAndSaveTelemetry(deviceID string, telemetry map[string][]api.TelemetryPoint, dbManager *database.DBManager) int {
+	// Считаем количество полученных записей
+	recordsCount := 0
+	for _, points := range telemetry {
+		recordsCount += len(points)
+	}
+
+	if recordsCount == 0 {
+		log.Printf("Для устройства %s новых данных не получено", deviceID)
+		return 0
+	}
+
+	log.Printf("Для устройства %s получено %d новых записей. Сохраняем в базу данных...", deviceID, recordsCount)
+
+	// Сохраняем телеметрию в базу данных
+	startTime := time.Now()
+	if err := dbManager.StoreTelemetry(deviceID, telemetry); err != nil {
+		log.Printf("Ошибка при сохранении телеметрии для устройства %s: %v", deviceID, err)
+		return 0
+	}
+
+	// Вычисляем, сколько времени заняло сохранение данных
+	elapsed := time.Since(startTime)
+	log.Printf("Данные для устройства %s успешно сохранены в базу (время: %.2f сек., скорость: %.1f записей/сек.)",
+		deviceID,
+		elapsed.Seconds(),
+		float64(recordsCount)/elapsed.Seconds())
+
+	return recordsCount
 }
 
 // timePeriod представляет временной период с началом и концом

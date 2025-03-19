@@ -57,12 +57,21 @@ type Device struct {
 	Latitude      float64 `json:"latitude"`
 	Longitude     float64 `json:"longitude"`
 	Airtemp       float64 `json:"airtemp"`
-	RainfallDaily float64 `json:"rainfall_daily"`
-	Battery       float64 `json:"battery"`
+	Rainfall      float64 `json:"rainfall"`
+	BatteryCharge float64 `json:"battery.charge"`
 	Clients       []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"clients"`
+	Sensors map[string]struct {
+		Active     bool        `json:"active"`
+		Name       string      `json:"name"`
+		CustomName string      `json:"custom_name"`
+		Unit       interface{} `json:"unit"`
+		Formula    string      `json:"formula"`
+		LastValue  interface{} `json:"last_value"`
+		Ts         int64       `json:"ts"`
+	} `json:"sensors"`
 }
 
 // DevicesResponse представляет собой ответ на получение списка устройств
