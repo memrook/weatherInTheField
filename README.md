@@ -30,7 +30,7 @@
 
 1. Клонируйте репозиторий:
    ```
-   git clone <repository-url>
+   git clone https://github.com/memrook/weatherInTheField.git
    cd weatherInTheField
    ```
 
