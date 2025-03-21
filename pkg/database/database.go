@@ -64,7 +64,8 @@ func (d *DBManager) CreateTablesIfNotExists() error {
 		Label NVARCHAR(255),
 		Latitude FLOAT,
 		Longitude FLOAT,
-		LastUpdate DATETIME
+		LastUpdate DATETIME2,
+		CreatedAt DATETIME2 DEFAULT GETDATE()
 	)
 	`)
 	if err != nil {
@@ -79,8 +80,9 @@ func (d *DBManager) CreateTablesIfNotExists() error {
 		StationID NVARCHAR(100) NOT NULL,
 		SensorKey NVARCHAR(100) NOT NULL,
 		Timestamp BIGINT NOT NULL,
-		DateValue DATETIME NOT NULL,
+		DateValue DATETIME2 NOT NULL,
 		Value FLOAT,
+		CreatedAt DATETIME2 DEFAULT GETDATE(),
 		CONSTRAINT FK_Telemetry_Stations FOREIGN KEY (StationID) REFERENCES Stations(ID),
 		CONSTRAINT UQ_Telemetry_Station_Sensor_Date UNIQUE (StationID, SensorKey, Timestamp)
 	)
@@ -137,8 +139,8 @@ func (d *DBManager) StoreStations(devices []api.Device) error {
 			Longitude = source.Longitude,
 			LastUpdate = GETDATE()
 	WHEN NOT MATCHED THEN
-		INSERT (ID, Name, Label, Latitude, Longitude, LastUpdate)
-		VALUES (source.ID, source.Name, source.Label, source.Latitude, source.Longitude, GETDATE());
+		INSERT (ID, Name, Label, Latitude, Longitude, LastUpdate, CreatedAt)
+		VALUES (source.ID, source.Name, source.Label, source.Latitude, source.Longitude, GETDATE(), GETDATE());
 	`)
 	if err != nil {
 		tx.Rollback()
@@ -258,8 +260,8 @@ func (d *DBManager) storeTelemetryBatch(deviceID string, batch []struct {
 	stmt, err := tx.Prepare(`
 	IF NOT EXISTS (SELECT 1 FROM Telemetry WHERE StationID = @StationID AND SensorKey = @SensorKey AND Timestamp = @Timestamp)
 	BEGIN
-		INSERT INTO Telemetry (StationID, SensorKey, Timestamp, DateValue, Value)
-		VALUES (@StationID, @SensorKey, @Timestamp, @DateValue, @Value)
+		INSERT INTO Telemetry (StationID, SensorKey, Timestamp, DateValue, Value, CreatedAt)
+		VALUES (@StationID, @SensorKey, @Timestamp, @DateValue, @Value, GETDATE())
 	END
 	ELSE
 	BEGIN
