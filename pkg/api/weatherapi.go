@@ -251,7 +251,7 @@ func (w *WeatherAPI) GetTelemetry(deviceID string, keys []string, tsFrom int64, 
 	}
 
 	if telemetryResp.Status != "OK" {
-		// Предполагаем, что если статус не OK, то сессия может быть недействительной
+		// Предполагаем, что если статус не OK, то сессия может быть недействительной.
 		// Пробуем войти снова и повторить запрос
 		if err := w.Login(); err != nil {
 			return nil, err

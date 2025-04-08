@@ -64,8 +64,7 @@ func (d *DBManager) CreateTablesIfNotExists() error {
 		Label NVARCHAR(255),
 		Latitude FLOAT,
 		Longitude FLOAT,
-		LastUpdate DATETIME2,
-		CreatedAt DATETIME2 DEFAULT GETDATE()
+		LastUpdate DATETIME2
 	)
 	`)
 	if err != nil {
@@ -139,8 +138,8 @@ func (d *DBManager) StoreStations(devices []api.Device) error {
 			Longitude = source.Longitude,
 			LastUpdate = GETDATE()
 	WHEN NOT MATCHED THEN
-		INSERT (ID, Name, Label, Latitude, Longitude, LastUpdate, CreatedAt)
-		VALUES (source.ID, source.Name, source.Label, source.Latitude, source.Longitude, GETDATE(), GETDATE());
+		INSERT (ID, Name, Label, Latitude, Longitude, LastUpdate)
+		VALUES (source.ID, source.Name, source.Label, source.Latitude, source.Longitude, GETDATE());
 	`)
 	if err != nil {
 		tx.Rollback()
